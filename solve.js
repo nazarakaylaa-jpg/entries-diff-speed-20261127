@@ -212,6 +212,181 @@ function myersRuns(a, an, b, bm, banded) {
   return bt.runs;
 }
 
+/** Backtrack the runs of a finished banded search, whose flat V rows are stored compactly:
+ * row d at d*BW, diagonal k at d*BW + (k - kLo). */
+function backtrackCompact(V, D, kEnd, an, bm, kLo, BW) {
+  const rev = [];
+  let k = kEnd;
+  let cx = an;
+  let kMin = k;
+  let kMax = k;
+  for (let d = D; d >= 1; d--) {
+    const baseP = (d - 1) * BW;
+    const t = k - kLo;
+    const parityP = (d - 1 - kLo) & 1;
+    let tLoPrev = Math.max(0, -(d - 1) - kLo);
+    if ((tLoPrev & 1) !== parityP) tLoPrev++;
+    let tHiPrev = Math.min(BW - 1, (d - 1) - kLo);
+    if ((tHiPrev & 1) !== parityP) tHiPrev--;
+    let delX = -1;
+    let insX = -1;
+    if (t - 1 >= tLoPrev) {
+      const v = V[baseP + t - 1];
+      if (v < an) delX = v + 1;
+    }
+    if (t + 1 <= tHiPrev) {
+      const v = V[baseP + t + 1];
+      if (v - k <= bm) insX = v;
+    }
+    let x0;
+    let kind;
+    if (delX >= insX) {
+      kind = DELETE;
+      x0 = delX;
+    } else {
+      kind = INSERT;
+      x0 = insX;
+    }
+    const snake = cx - x0;
+    if (snake > 0) rev.push([KEEP, snake]);
+    rev.push([kind, 1]);
+    if (kind === DELETE) {
+      cx = x0 - 1;
+      k = k - 1;
+    } else {
+      cx = x0;
+      k = k + 1;
+    }
+    if (k < kMin) kMin = k;
+    if (k > kMax) kMax = k;
+  }
+  if (cx > 0) rev.push([KEEP, cx]);
+
+  const runs = [];
+  for (let i = rev.length - 1; i >= 0; i--) {
+    const r = rev[i];
+    const last = runs.length > 0 ? runs[runs.length - 1] : undefined;
+    if (last !== undefined && last[0] === r[0]) last[1] += r[1];
+    else runs.push([r[0], r[1]]);
+  }
+  return { runs, kMin, kMax };
+}
+
+/**
+ * The banded search on the compact layout: row d at d*BW, diagonal k at d*BW + (k - kLo),
+ * so the whole V table is (capD+1)*BW entries (~9 MB for this competition) instead of the
+ * (capD+1)^2 triangle (~260 MB). Same rule as myersRuns: deletion wins ties, no edge pruning,
+ * snakes follow every equal run. Returns null when it must fall back to the unbanded search.
+ */
+function myersRunsBanded(a, an, b, bm) {
+  if (an === 0) return bm === 0 ? [] : [[INSERT, bm]];
+  if (bm === 0) return [[DELETE, an]];
+  const kEnd = an - bm;
+  const kLo = Math.min(0, kEnd) - BAND_W;
+  const kHi = Math.max(0, kEnd) + BAND_W;
+  const BW = kHi - kLo + 1;
+  let capD = Math.max(1024, Math.ceil((an + bm) * 0.08));
+  let V = new Int32Array((capD + 1) * BW);
+  let x = 0;
+  while (a[x] === b[x]) x++;
+  V[-kLo] = x;
+  let D = -1;
+  if (x === an && x === bm) {
+    D = 0;
+  } else {
+    outer: for (let d = 1; ; d++) {
+      if (d > BAND_D_CAP) return null;
+      if (d > capD) {
+        const ncap = d * 2;
+        const NV = new Int32Array((ncap + 1) * BW);
+        NV.set(V);
+        V = NV;
+        capD = ncap;
+      }
+      const baseD = d * BW;
+      const baseP = (d - 1) * BW;
+      const parity = (d - kLo) & 1;
+      let tLo = Math.max(0, -d - kLo);
+      if ((tLo & 1) !== parity) tLo++;
+      let tHi = Math.min(BW - 1, d - kLo);
+      if ((tHi & 1) !== parity) tHi--;
+      const parityP = (d - 1 - kLo) & 1;
+      let tLoPrev = Math.max(0, -(d - 1) - kLo);
+      if ((tLoPrev & 1) !== parityP) tLoPrev++;
+      let tHiPrev = Math.min(BW - 1, (d - 1) - kLo);
+      if ((tHiPrev & 1) !== parityP) tHiPrev--;
+      const iLo = Math.max(tLo, tLoPrev + 1);
+      const iHi = Math.min(tHi, tHiPrev - 1);
+      let pi = baseP + tLo;
+      let di = baseD + tLo;
+      let k = tLo + kLo;
+      // Left edge diagonal: its deletion predecessor is outside the band.
+      if (tLo <= tLoPrev) {
+        const vi = V[pi + 1];
+        let x0 = vi - k <= bm ? vi : -1;
+        if (x0 < 0) {
+          V[di] = SENT;
+        } else {
+          let y0 = x0 - k;
+          while (a[x0] === b[y0]) {
+            x0++;
+            y0++;
+          }
+          V[di] = x0;
+        }
+        pi += 2;
+        di += 2;
+        k += 2;
+      }
+      for (let t = iLo; t <= iHi; t += 2) {
+        const vd = V[pi - 1];
+        const vi = V[pi + 1];
+        const delX = vd < an ? vd + 1 : -1;
+        const insX = vi - k <= bm ? vi : -1;
+        let x0 = delX >= insX ? delX : insX;
+        if (x0 < 0) {
+          V[di] = SENT;
+        } else {
+          let y0 = x0 - k;
+          while (a[x0] === b[y0]) {
+            x0++;
+            y0++;
+          }
+          V[di] = x0;
+        }
+        pi += 2;
+        di += 2;
+        k += 2;
+      }
+      // Right edge diagonal: its insertion predecessor is outside the band.
+      if (pi - baseP <= tHi) {
+        const vd = V[pi - 1];
+        let x0 = vd < an ? vd + 1 : -1;
+        if (x0 < 0) {
+          V[di] = SENT;
+        } else {
+          let y0 = x0 - k;
+          while (a[x0] === b[y0]) {
+            x0++;
+            y0++;
+          }
+          V[di] = x0;
+        }
+      }
+      // Reached both ends when the row's kEnd diagonal consumed every old line.
+      const tEnd = kEnd - kLo;
+      if ((tEnd & 1) === parity && tEnd >= tLo && tEnd <= tHi && V[baseD + tEnd] === an) {
+        D = d;
+        break outer;
+      }
+    }
+  }
+
+  const bt = backtrackCompact(V, D, kEnd, an, bm, kLo, BW);
+  if (bt.kMin < kLo + BAND_MARGIN || bt.kMax > kHi - BAND_MARGIN) return null;
+  return bt.runs;
+}
+
 /** A line as the patch writes it: op + line, a newline, and "%" on its own line when it had none. */
 function written(op, parts, i, nLines, endsNL) {
   const hasNL = i < nLines - 1 || endsNL;
@@ -287,7 +462,7 @@ export function run(input) {
   aMid[an] = -1;
   bMid[bm] = -2;
 
-  let mid = myersRuns(aMid, an, bMid, bm, true);
+  let mid = myersRunsBanded(aMid, an, bMid, bm);
   if (mid === null) mid = myersRuns(aMid, an, bMid, bm, false);
 
   const runs = [];
